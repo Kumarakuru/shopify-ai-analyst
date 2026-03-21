@@ -1,0 +1,10 @@
+streamlit
+pandas
+requests
+chromadb
+sentence-transformers
+langchain
+langchain-community
+groq
+shopify
+python-dotenv
