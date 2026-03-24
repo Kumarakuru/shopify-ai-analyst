@@ -1,84 +1,120 @@
 import streamlit as st
 import pandas as pd
-from sentence_transformers import SentenceTransformer
+from openai import OpenAI
 import chromadb
-from groq import Groq
-import os
 
-st.title("🛍️ Shopify AI Analyst + PO Generator (Free on GitHub)")
+st.set_page_config(page_title="Shopify AI Analyst", layout="wide")
+st.title("🛍️ Shopify AI Analyst — HF llama.cpp (Qwen3 Embedding + Chat)")
 
-# === Secrets (add in .streamlit/secrets.toml or GitHub Secrets later) ===
-SHOPIFY_ACCESS_TOKEN = st.secrets.get("SHOPIFY_TOKEN", "your_token_here")
-GROQ_API_KEY = st.secrets.get("GROQ_KEY", "gsk_xxx")   # free at groq.com
+# ====================== ENDPOINTS ======================
+col1, col2 = st.columns(2)
+with col1:
+    embed_url = st.text_input("Embedding Endpoint (your Qwen3-Embedding)", 
+                              "https://rnk392h3d7rcmjm3.us-east4.gcp.endpoints.huggingface.cloud/v1",
+                              help="Paste your current endpoint")
+with col2:
+    gen_url = st.text_input("Generation Endpoint (Qwen3-Instruct)", 
+                            "https://YOUR-GEN-ENDPOINT.hf.co/v1",
+                            help="Create the second cheap CPU endpoint with Qwen3-8B-Instruct-GGUF")
 
-client = Groq(api_key=GROQ_API_KEY)
-embedder = SentenceTransformer("Snowflake/snowflake-arctic-embed-m")  # Arctic Embed — SOTA & tiny
+embed_client = OpenAI(base_url=embed_url, api_key="hf_any")
+gen_client   = OpenAI(base_url=gen_url, api_key="hf_any")
 
-# Persistent Chroma (rebuilds every time — fine for <5000 rows)
+# Chroma DB
 @st.cache_resource
-def get_chroma():
-    return chromadb.PersistentClient(path="./chroma_db")
+def get_collection():
+    client = chromadb.PersistentClient(path="./shopify_chroma")
+    return client.get_or_create_collection("shopify_reports")
 
-collection = get_chroma().get_or_create_collection("shopify")
+collection = get_collection()
 
-# ====================== UPLOAD / VECTORIZE SECTION ======================
-st.header("1. Download these 4 Shopify reports (CSV)")
+# ====================== 1. VECTORIZE ======================
+st.header("1. 📁 Upload & Vectorize Shopify Reports")
+st.info("Upload the 4 CSVs you downloaded (Products + Sales by product + Inventory + Orders)")
 
-st.markdown("""
-**Go to Shopify Admin → Analytics → Reports** and export these:
-1. **Products** → "All products" or "Total sales by product"
-2. **Sales by product variant** (best sellers data)
-3. **Inventory** (from Products → Inventory → Export)
-4. **Orders** (last 30/90 days) or "Total sales by order"
+uploaded = st.file_uploader("Drop all 4 CSVs here", type="csv", accept_multiple_files=True)
 
-**Alternative (easier & auto):** Use GraphQL bulk export later.
+if st.button("🚀 Vectorize with Qwen3-Embedding (HF llama.cpp)") and uploaded:
+    with st.spinner("Extracting + embedding..."):
+        texts = []
+        for file in uploaded:
+            df = pd.read_csv(file)
+            for _, row in df.iterrows():
+                row_text = " | ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
+                texts.append(row_text)
+        
+        # Embed using YOUR HF endpoint
+        emb_response = embed_client.embeddings.create(
+            input=texts[:500],  # limit for speed, increase if needed
+            model="Qwen3-Embedding-4B"   # or just omit
+        )
+        embeddings = [data.embedding for data in emb_response.data]
+        
+        collection.add(
+            documents=texts[:500],
+            embeddings=embeddings,
+            ids=[f"doc_{i}" for i in range(len(embeddings))]
+        )
+        st.success(f"✅ Vectorized {len(embeddings)} rows using your HF llama.cpp embedding endpoint!")
+        st.caption("You can upload more later — it will append")
 
-Drag the 4 CSVs here:
-""")
+# ====================== 2. ASK AI ======================
+st.header("2. 💬 Ask Anything About Your Store")
 
-uploaded = st.file_uploader("Upload your Shopify CSVs (multiple ok)", accept_multiple_files=True, type="csv")
+preset = st.selectbox("Quick presets", [
+    "Show current sales overview (top 5 best sellers + total revenue)",
+    "What are the weak areas / points to improve (low stock, slow movers)",
+    "Prepare a PO for next 60 days — reorder top fast movers that are low stock",
+    "Give me full store health report + action list",
+    "Custom query..."
+])
 
-if st.button("🚀 Vectorize with Arctic Embed + Save") and uploaded:
-    texts = []
-    for file in uploaded:
-        df = pd.read_csv(file)
-        for _, row in df.iterrows():
-            text = f"Product: {row.get('Title') or row.get('Product')}\n"
-            text += f"Sales: {row.get('Net quantity') or row.get('Sales')}\n"
-            text += f"Inventory: {row.get('Available') or row.get('On hand')}\n"
-            text += f"Vendor: {row.get('Vendor')}\n"
-            text += f"Description: {row.get('Body') or ''}\n---"
-            texts.append(text)
-    
-    embeddings = embedder.encode(texts)
-    collection.add(
-        documents=texts,
-        embeddings=embeddings,
-        ids=[str(i) for i in range(len(texts))]
-    )
-    st.success(f"✅ Vectorized {len(texts)} chunks with Snowflake Arctic Embed!")
+if preset == "Custom query...":
+    query = st.text_input("Type your question", "What should I do this month?")
+else:
+    query = preset
 
-# ====================== QUERY SECTION ======================
-query = st.text_input("Ask anything", "Show best sellers last 30 days, weak areas (low stock/high return), and prepare PO for top 3 fast movers")
+if st.button("🚀 Get Smart Answer + PO from Qwen3"):
+    with st.spinner("Retrieving context + thinking..."):
+        # Retrieve relevant chunks
+        results = collection.query(query_texts=[query], n_results=15)
+        context = "\n\n".join(results["documents"][0])
+        
+        prompt = f"""You are an expert Shopify store manager and buyer.
+Use ONLY the data below from the merchant's reports.
 
-if st.button("Ask AI"):
-    # Retrieve from vector DB
-    results = collection.query(query_texts=[query], n_results=10)
-    context = "\n\n".join(results["documents"][0])
-    
-    prompt = f"""You are expert Shopify store manager.
-    Context (vectorized reports):\n{context}\n
-    User: {query}
-    Answer naturally + give clear tables + ready-to-copy PO if asked."""
-    
-    chat = client.chat.completions.create(
-        model="llama3-70b-8192",  # or "qwen-qwq-32b" if available — feels like Qwen3 boosted by RAG
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
-    )
-    answer = chat.choices[0].message.content
-    st.markdown("### 📊 Answer + PO")
-    st.write(answer)
-    st.download_button("📥 Download PO as .txt", answer, "purchase_order.txt")
+Data:
+{context}
 
-st.caption("💡 This runs 100% free on Streamlit Cloud + Groq free tier + real Arctic Embed")
+Question: {query}
+
+Answer in clear sections:
+- 📊 Summary / Numbers
+- 🔍 Insights (best sellers, weak areas)
+- 📋 Actionable PO (ready to copy-paste with product, qty, estimated cost)
+Use tables when helpful."""
+
+        answer = gen_client.chat.completions.create(
+            model="Qwen3-8B-Instruct",   # change if you used different name
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=2048
+        ).choices[0].message.content
+
+        st.markdown("### 📊 Answer")
+        st.markdown(answer)
+        
+        st.download_button("📥 Download as PO + Report.txt", answer, file_name="Shopify_PO_Report.txt")
+
+# Extra nice buttons
+colA, colB, colC = st.columns(3)
+if colA.button("📈 Current Sales Overview"):
+    st.session_state.query = "Show current sales overview (top 5 best sellers + total revenue)"
+if colB.button("⚠️ Weak Areas + Improve"):
+    st.session_state.query = "What are the weak areas / points to improve (low stock, slow movers)"
+if colC.button("📦 Prepare PO 60 days"):
+    st.session_state.query = "Prepare a PO for next 60 days — reorder top fast movers that are low stock"
+
+st.caption("💡 Tip: After first vectorize, just type any question. Everything runs on your HF llama.cpp endpoints. Pause endpoints when done to save money.")
+
+st.success("Deploy this on Streamlit Cloud → you now have your own public Shopify AI dashboard! 🚀")
