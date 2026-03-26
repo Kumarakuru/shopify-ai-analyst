@@ -96,4 +96,54 @@ if st.button("🚀 Vectorize Reports") and uploaded:
                 st.error(f"Vectorize failed: {str(e)[:300]}")
 
         if success_count > 0:
-            st.success(f"🎉 Successfully vectorized and stored {success_count}
+            st.success(f"🎉 Successfully vectorized and stored {success_count} rows!")
+            st.rerun()
+
+# ====================== 2. ASK ======================
+st.header("2. 💬 Ask About Your Store")
+
+preset = st.selectbox("Quick Questions", [
+    "Show current sales overview (top 5 best sellers + total revenue)",
+    "What are the weak areas / points to improve (low stock, slow movers)",
+    "Prepare a PO for next 60 days — suggest reorder quantities for fast movers with low stock",
+    "Give me a full store health report with action items",
+    "Custom query..."
+])
+
+if preset == "Custom query...":
+    query = st.text_input("Your question")
+else:
+    query = preset
+
+if st.button("🚀 Get Answer + PO"):
+    if collection.count() == 0:
+        st.error("No data stored! Please vectorize your reports first.")
+    else:
+        with st.spinner("Generating answer..."):
+            results = collection.query(query_texts=[query], n_results=12)
+            context = "\n\n".join(results["documents"][0])
+
+            prompt = f"""You are an expert Shopify store manager.
+
+Context from your store reports:
+{context}
+
+Question: {query}
+
+Answer with summary, insights, and ready PO suggestions. Use tables when helpful."""
+
+            try:
+                resp = gen_client.chat.completions.create(
+                    model="qwen2-5-vl-7b-instruct-gguf-mat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3
+                )
+                answer = resp.choices[0].message.content
+
+                st.markdown("### 📊 Answer")
+                st.markdown(answer)
+                st.download_button("📥 Download Report", answer, "Shopify_Report_PO.txt")
+            except Exception as e:
+                st.error(f"Generation failed: {str(e)}")
+
+st.caption("Data is saved in ChromaDB • Free Streamlit sometimes loses data after long inactivity")
