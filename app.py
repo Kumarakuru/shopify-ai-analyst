@@ -10,12 +10,12 @@ st.title("🛍️ Shopify AI Analyst — HF llama.cpp (Qwen3 Embedding + Chat)")
 col1, col2 = st.columns(2)
 with col1:
     embed_url = st.text_input("Embedding Endpoint (your Qwen3-Embedding)", 
-                              "https://rnk392h3d7rcmjm3.us-east4.gcp.endpoints.huggingface.cloud/v1",
+                              "https://rnk392h3d7rcmjm3.us-east4.gcp.endpoints.huggingface.cloud",
                               help="Paste your current endpoint")
 with col2:
     gen_url = st.text_input("Generation Endpoint (Qwen3-Instruct)", 
-                            "https://YOUR-GEN-ENDPOINT.hf.co/v1",
-                            help="Create the second cheap CPU endpoint with Qwen3-8B-Instruct-GGUF")
+                            "https://pn6ric9mq7jcq9oi.us-east-1.aws.endpoints.huggingface.cloud",
+                            help="Create the second CPU endpoint with Qwen3-8B-Instruct-GGUF")
 
 embed_client = OpenAI(base_url=embed_url, api_key="hf_any")
 gen_client   = OpenAI(base_url=gen_url, api_key="hf_any")
