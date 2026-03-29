@@ -12,7 +12,7 @@ gen_client = OpenAI(base_url=GEN_URL.rstrip('/'), api_key="hf_dummy")
 # ====================== LOAD CHROMA FROM VOLUME ======================
 @st.cache_resource
 def get_collection():
-    client = chromadb.PersistentClient(path="./shopify_chroma")
+    client = chromadb.PersistentClient(path="/app/shopify_chroma")
     
     try:
         collection = client.get_collection("shopify_reports")
