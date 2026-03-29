@@ -4,103 +4,25 @@ from openai import OpenAI
 import chromadb
 
 st.set_page_config(page_title="Shopify AI Analyst", layout="wide")
-st.title("🛍️ Shopify AI Analyst — HF llama.cpp")
+st.title("🛍️ Shopify AI Analyst (Local Vectorized + HF Chat)")
 
-# ====================== YOUR EXACT ENDPOINTS ======================
-st.subheader("Your Endpoints")
+# ====================== YOUR EXACT GENERATION URL ======================
+GEN_URL = "https://pn6ric9mq7jcq9oi.us-east-1.aws.endpoints.huggingface.cloud/v1"
 
-col1, col2 = st.columns(2)
-with col1:
-    embed_url = st.text_input(
-        "Embedding Endpoint",
-        "https://rnk392h3d7rcmjm3.us-east4.gcp.endpoints.huggingface.cloud/v1",
-        disabled=True
-    )
-with col2:
-    gen_url = st.text_input(
-        "Generation Endpoint",
-        "https://pn6ric9mq7jcq9oi.us-east-1.aws.endpoints.huggingface.cloud/v1",
-        disabled=True
-    )
+gen_client = OpenAI(base_url=GEN_URL.rstrip('/'), api_key="hf_dummy")
 
-dummy_key = "hf_dummy"
-embed_client = OpenAI(base_url=embed_url.rstrip('/'), api_key=dummy_key)
-gen_client   = OpenAI(base_url=gen_url.rstrip('/'), api_key=dummy_key)
-
-# ====================== CHROMA DB ======================
+# ====================== LOAD PERSISTENT CHROMA FROM GITHUB ======================
 @st.cache_resource
 def get_collection():
     client = chromadb.PersistentClient(path="./shopify_chroma")
-    try:
-        client.delete_collection("shopify_reports")
-    except:
-        pass
-    return client.get_or_create_collection(
-        name="shopify_reports",
-        metadata={"hnsw:space": "cosine"}
-    )
+    return client.get_or_create_collection("shopify_reports")
 
 collection = get_collection()
 
-stored_count = collection.count()
-st.info(f"**Current Status:** {stored_count} vectors stored")
+st.info(f"**Loaded {collection.count()} vectors** from GitHub (pre-vectorized on your PC)")
 
-if stored_count == 0:
-    st.warning("⚠️ No data stored yet. Upload CSVs and click Vectorize.")
-else:
-    st.success(f"✅ {stored_count} vectors ready. You can ask questions.")
-
-# ====================== 1. VECTORIZE ======================
-st.header("1. 📁 Upload & Vectorize Shopify Reports")
-
-uploaded = st.file_uploader("Drop Shopify CSVs here", type="csv", accept_multiple_files=True)
-
-if st.button("🚀 Vectorize Reports") and uploaded:
-    with st.spinner("Vectorizing with Qwen3-Embedding-4B..."):
-        texts = []
-        for file in uploaded:
-            try:
-                df = pd.read_csv(file)
-                for _, row in df.iterrows():
-                    row_text = " | ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
-                    texts.append(row_text)
-            except:
-                pass
-
-        if not texts:
-            st.error("No data found in the files.")
-            st.stop()
-
-        batch_size = 100
-        success_count = 0
-
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            try:
-                # FIXED: Added model parameter
-                response = embed_client.embeddings.create(
-                    input=batch,
-                    model="Qwen3-Embedding-4B",      # This was missing
-                    encoding_format="float"
-                )
-                embeddings = [data.embedding for data in response.data]
-
-                collection.add(
-                    documents=batch,
-                    embeddings=embeddings,
-                    ids=[f"doc_{i+j}" for j in range(len(batch))]
-                )
-                success_count += len(batch)
-                st.success(f"✅ Batch {i//batch_size + 1} done ({len(batch)} rows)")
-            except Exception as e:
-                st.error(f"Vectorize failed: {str(e)[:300]}")
-
-        if success_count > 0:
-            st.success(f"🎉 Successfully vectorized and stored {success_count} rows!")
-            st.rerun()
-
-# ====================== 2. ASK ======================
-st.header("2. 💬 Ask About Your Store")
+# ====================== ASK QUESTIONS ======================
+st.header("Ask About Your Store")
 
 preset = st.selectbox("Quick Questions", [
     "Show current sales overview (top 5 best sellers + total revenue)",
@@ -117,33 +39,37 @@ else:
 
 if st.button("🚀 Get Answer + PO"):
     if collection.count() == 0:
-        st.error("No data stored! Please vectorize your reports first.")
+        st.error("No vectors found. Make sure shopify_chroma folder is in the GitHub repo.")
     else:
-        with st.spinner("Generating answer..."):
-            results = collection.query(query_texts=[query], n_results=12)
+        with st.spinner("Retrieving context + generating answer..."):
+            results = collection.query(query_texts=[query], n_results=15)
             context = "\n\n".join(results["documents"][0])
 
             prompt = f"""You are an expert Shopify store manager.
 
-Context from your store reports:
+Context from pre-vectorized reports:
 {context}
 
 Question: {query}
 
-Answer with summary, insights, and ready PO suggestions. Use tables when helpful."""
+Answer clearly with:
+- Summary
+- Key insights (best sellers, weak areas)
+- Ready-to-copy Purchase Order (PO) suggestions
 
-            try:
-                resp = gen_client.chat.completions.create(
-                    model="qwen2-5-vl-7b-instruct-gguf-mat",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3
-                )
-                answer = resp.choices[0].message.content
+Use markdown tables when helpful."""
 
-                st.markdown("### 📊 Answer")
-                st.markdown(answer)
-                st.download_button("📥 Download Report", answer, "Shopify_Report_PO.txt")
-            except Exception as e:
-                st.error(f"Generation failed: {str(e)}")
+            resp = gen_client.chat.completions.create(
+                model="qwen2-5-vl-7b-instruct-gguf-mat",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=2048
+            )
+            answer = resp.choices[0].message.content
 
-st.caption("Data is saved in ChromaDB • Free Streamlit sometimes loses data after long inactivity")
+            st.markdown("### 📊 Answer")
+            st.markdown(answer)
+
+            st.download_button("📥 Download Report + PO", answer, "Shopify_AI_Report.txt")
+
+st.caption("Vectorization done locally once • Data loaded from GitHub • Only chat runs on HF")
