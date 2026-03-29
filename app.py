@@ -1,37 +1,38 @@
 import streamlit as st
 from openai import OpenAI
 import chromadb
+import os
 
 st.set_page_config(page_title="Shopify AI Analyst", layout="wide")
 st.title("🛍️ Shopify AI Analyst (Pre-vectorized Data)")
 
-# ====================== YOUR GENERATION ENDPOINT ======================
+# ====================== GENERATION ENDPOINT ======================
 GEN_URL = "https://pn6ric9mq7jcq9oi.us-east-1.aws.endpoints.huggingface.cloud/v1"
 gen_client = OpenAI(base_url=GEN_URL.rstrip('/'), api_key="hf_dummy")
 
 # ====================== LOAD CHROMA READ-ONLY ======================
 @st.cache_resource
 def get_collection():
-    client = chromadb.PersistentClient(path="./shopify_chroma")
+    chroma_path = "./shopify_chroma"
+    if not os.path.exists(chroma_path):
+        st.error("shopify_chroma folder not found in the repo.")
+        st.stop()
+    
+    client = chromadb.PersistentClient(path=chroma_path)
     try:
         # Try to get existing collection without writing
         collection = client.get_collection("shopify_reports")
-        st.sidebar.success("✅ Loaded existing collection from GitHub")
         return collection
     except Exception as e:
-        st.error(f"Could not load collection: {e}")
-        st.error("Make sure the 'shopify_chroma' folder is correctly uploaded to the root of your GitHub repo.")
+        st.error(f"Failed to load collection: {e}")
+        st.error("The shopify_chroma folder may be corrupted or in wrong format.")
         st.stop()
 
 collection = get_collection()
 
-st.info(f"✅ Loaded {collection.count()} vectors from GitHub (pre-vectorized locally)")
+st.success(f"✅ Successfully loaded {collection.count()} vectors from GitHub!")
 
-if collection.count() == 0:
-    st.warning("No vectors found in the uploaded folder.")
-    st.stop()
-
-# ====================== QUERY SECTION ======================
+# ====================== QUERY ======================
 st.header("Ask About Your Store")
 
 preset = st.selectbox("Quick Questions", [
@@ -48,37 +49,35 @@ else:
     query = preset
 
 if st.button("🚀 Get Answer + PO"):
-    with st.spinner("Retrieving context and generating answer..."):
-        results = collection.query(query_texts=[query], n_results=12)
-        context = "\n\n".join(results["documents"][0])
+    if collection.count() == 0:
+        st.error("Collection is empty.")
+    else:
+        with st.spinner("Retrieving context and generating answer..."):
+            results = collection.query(query_texts=[query], n_results=12)
+            context = "\n\n".join(results["documents"][0])
 
-        prompt = f"""You are an expert Shopify store manager.
+            prompt = f"""You are an expert Shopify store manager.
 
-Context from your store reports:
+Context from pre-vectorized reports:
 {context}
 
 Question: {query}
 
-Answer with:
-- Summary
-- Key insights (best sellers, weak areas)
-- Ready-to-copy Purchase Order suggestions
+Provide a clear answer with summary, insights, and ready-to-copy PO suggestions. Use tables when helpful."""
 
-Use tables when helpful."""
+            try:
+                resp = gen_client.chat.completions.create(
+                    model="qwen2-5-vl-7b-instruct-gguf-mat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=2048
+                )
+                answer = resp.choices[0].message.content
 
-        try:
-            resp = gen_client.chat.completions.create(
-                model="qwen2-5-vl-7b-instruct-gguf-mat",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=2048
-            )
-            answer = resp.choices[0].message.content
+                st.markdown("### 📊 Answer")
+                st.markdown(answer)
+                st.download_button("📥 Download Report + PO", answer, "Shopify_Report_PO.txt")
+            except Exception as e:
+                st.error(f"Generation failed: {str(e)}")
 
-            st.markdown("### 📊 Answer")
-            st.markdown(answer)
-            st.download_button("📥 Download Report + PO", answer, "Shopify_Report_PO.txt")
-        except Exception as e:
-            st.error(f"Generation failed: {str(e)}")
-
-st.caption("Vectors loaded from GitHub • Read-only mode • Only chat runs on HF")
+st.caption("Pre-vectorized data loaded from GitHub • Read-only mode")
