@@ -1,75 +1,102 @@
-import pandas as pd
+import streamlit as st
 from openai import OpenAI
 import chromadb
 import os
-from tqdm import tqdm
 
-# ====================== YOUR EXACT URLs ======================
+# Set page config at the very top
+st.set_page_config(page_title="Shopify AI Analyst", layout="wide")
+
+st.title("🛍️ Shopify AI Analyst")
+
+# ====================== ENDPOINT CONFIGURATION ======================
 EMBED_URL = "https://rnk392h3d7rcmjm3.us-east4.gcp.endpoints.huggingface.cloud/v1"
+GEN_URL = "https://pn6ric9mq7jcq9oi.us-east-1.aws.endpoints.huggingface.cloud/v1"
 
-client = OpenAI(base_url=EMBED_URL.rstrip('/'), api_key="hf_dummy")   # dummy works for most endpoints
+embed_client = OpenAI(base_url=EMBED_URL.rstrip('/'), api_key="hf_dummy")
+gen_client = OpenAI(base_url=GEN_URL.rstrip('/'), api_key="hf_dummy")
 
-# ====================== CHROMA DB (2560 dimension) ======================
-client_db = chromadb.PersistentClient(path="./shopify_chroma")
-try:
-    client_db.delete_collection("shopify_reports")
-except:
-    pass
-
-collection = client_db.get_or_create_collection(
-    name="shopify_reports",
-    metadata={"hnsw:space": "cosine"}
-)
-
-print("✅ ChromaDB ready (dimension 2560 for Qwen3-Embedding-4B)")
-
-# ====================== LOAD YOUR CSVs ======================
-csv_files = [
-    "Total sales by product-24MAR26-24MAR25.csv",
-    "Total sales by product variant-24MAR26-24MAR25.csv",
-    "products_export_1.csv",
-    "Inventory-24MAR26-24MAR25-01.csv"
-    # Add any other CSV files you have here
-]
-
-texts = []
-
-print("Reading CSVs...")
-for file in csv_files:
-    if os.path.exists(file):
-        df = pd.read_csv(file)
-        for _, row in tqdm(df.iterrows(), total=len(df), desc=f"Processing {file}"):
-            row_text = " | ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
-            texts.append(row_text)
-    else:
-        print(f"⚠️ File not found: {file}")
-
-print(f"Total chunks prepared: {len(texts)}")
-
-# ====================== VECTORIZE (using your HF embedding endpoint) ======================
-batch_size = 80   # safe for your T4 endpoint
-success = 0
-
-for i in range(0, len(texts), batch_size):
-    batch = texts[i:i+batch_size]
+# ====================== LOAD CHROMA DATA ======================
+@st.cache_resource
+def get_collection():
+    path = "./shopify_chroma"
+    if not os.path.exists(path):
+        st.error(f"Directory not found: {path}")
+        return None
+        
+    client = chromadb.PersistentClient(path=path)
+    
     try:
-        response = client.embeddings.create(
-            input=batch,
-            model="Qwen3-Embedding-4B",
-            encoding_format="float"
-        )
-        embeddings = [data.embedding for data in response.data]
-
-        collection.add(
-            documents=batch,
-            embeddings=embeddings,
-            ids=[f"doc_{i+j}" for j in range(len(batch))]
-        )
-        success += len(batch)
-        print(f"✅ Batch {i//batch_size + 1} done - {len(batch)} vectors added")
+        cols = client.list_collections()
+        if not cols:
+            st.sidebar.warning("No collections found in the folder.")
+            return None
+            
+        col_names = [c.name for c in cols]
+        target = "shopify_reports" if "shopify_reports" in col_names else col_names[0]
+        
+        collection = client.get_collection(name=target)
+        st.sidebar.success(f"✅ Loaded {collection.count()} vectors")
+        return collection
     except Exception as e:
-        print(f"❌ Batch failed: {e}")
+        st.sidebar.error(f"Database Error: {str(e)}")
+        return None
 
-print(f"\n🎉 Vectorization finished! Total stored: {success} vectors")
-print("Folder 'shopify_chroma' is now saved in the current directory.")
-print("Next step: Zip this folder and upload it to your GitHub repo.")
+# Attempt to load collection
+collection = get_collection()
+
+# ====================== UI & QUERY LOGIC ======================
+if collection is not None:
+    st.header("Ask About Your Store")
+    
+    preset = st.selectbox("Quick Questions", [
+        "Show current sales overview (top 5 best sellers + total revenue)",
+        "What are the weak areas / points to improve (low stock, slow movers)",
+        "Prepare a PO for next 60 days",
+        "Give me a full store health report",
+        "Custom query..."
+    ])
+
+    query = st.text_input("Your question") if preset == "Custom query..." else preset
+
+    if st.button("🚀 Analyze Data"):
+        with st.spinner("Communicating with AI models..."):
+            try:
+                # 1. Test Embedding Endpoint Connection
+                try:
+                    resp_embed = embed_client.embeddings.create(
+                        input=[query],
+                        model="Qwen3-Embedding-4B"
+                    )
+                    query_vector = resp_embed.data[0].embedding
+                except Exception as e:
+                    st.error(f"🛑 Embedding API Error (HF 503): The embedding server is currently offline or busy. Details: {str(e)}")
+                    st.stop()
+
+                # 2. Query Chroma
+                results = collection.query(
+                    query_embeddings=[query_vector], 
+                    n_results=10
+                )
+                context = "\n\n".join(results["documents"][0])
+
+                # 3. Generate Answer
+                try:
+                    prompt = f"You are an expert Shopify Analyst.\n\nContext:\n{context}\n\nQuestion: {query}"
+                    resp_gen = gen_client.chat.completions.create(
+                        model="qwen2-5-vl-7b-instruct-gguf-mat",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3
+                    )
+                    st.markdown("### 📊 Analysis Report")
+                    st.markdown(resp_gen.choices[0].message.content)
+                except Exception as e:
+                    st.error(f"🛑 Generation API Error: The reasoning server failed to respond. Details: {str(e)}")
+                
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {str(e)}")
+else:
+    st.info("Please ensure the 'shopify_chroma' folder is present in your GitHub repository.")
+    if st.button("Retry Connection"):
+        st.rerun()
+
+st.caption("Running on Railway • Data loaded from GitHub Repository")
