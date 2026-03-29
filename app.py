@@ -14,50 +14,49 @@ gen_client = OpenAI(base_url=GEN_URL.rstrip('/'), api_key="hf_dummy")
 # ====================== LOAD CHROMA FROM VOLUME ======================
 @st.cache_resource
 def get_collection():
-    # Railway Volume Mount Path
     volume_path = "/app/shopify_chroma"
-    # The path where GitHub files land (relative to the script)
-    github_deploy_path = os.path.join(os.getcwd(), "shopify_chroma")
+    # This is where your GitHub files actually sit BEFORE the volume hides them
+    # We use a relative path check to find the 'real' source
+    backup_source = os.path.join(os.getcwd(), "shopify_chroma")
     
-    st.sidebar.info(f"Checking volume at: {volume_path}")
-
-    # 1. Check if the volume is empty
-    volume_exists = os.path.exists(volume_path)
-    volume_files = os.listdir(volume_path) if volume_exists else []
+    st.sidebar.info(f"System Path: {os.getcwd()}")
     
-    if not volume_exists or len(volume_files) == 0:
-        st.sidebar.warning("Volume appears empty.")
+    # Check if the volume is currently empty
+    if not os.path.exists(volume_path) or len(os.listdir(volume_path)) == 0:
+        st.sidebar.warning("Volume is empty. Searching for deployment files...")
         
-        # 2. Try to find the files from the GitHub deployment to "seed" the volume
-        if os.path.exists(github_deploy_path) and github_deploy_path != volume_path:
-            st.sidebar.info("Found data in GitHub deployment. Copying to persistent volume...")
+        # Look for the data in the current directory (where GitHub puts it)
+        if os.path.exists("shopify_chroma"):
             try:
-                shutil.copytree(github_deploy_path, volume_path, dirs_exist_ok=True)
-                st.sidebar.success("✅ Volume initialized from GitHub data.")
+                # We copy to a temp location first if paths conflict, 
+                # but usually, we just need to ensure the volume gets the files.
+                st.sidebar.info("Data found in deployment! Copying to Volume...")
+                shutil.copytree("shopify_chroma", volume_path, dirs_exist_ok=True)
+                st.sidebar.success("✅ Copy Complete!")
             except Exception as e:
                 st.sidebar.error(f"Copy failed: {e}")
-        else:
-            st.sidebar.error("No source data found in GitHub folder to copy.")
 
-    # 3. Connect to Chroma using the Volume Path
+    # Now connect to the persistent volume
     client = chromadb.PersistentClient(path=volume_path)
     
     try:
-        collection = client.get_collection("shopify_reports")
-        count = collection.count()
-        if count > 0:
-            st.sidebar.success(f"🎊 Database Ready: {count} vectors loaded.")
+        # Diagnostic: List all collections found
+        all_collections = client.list_collections()
+        if all_collections:
+            names = [c.name for c in all_collections]
+            st.sidebar.info(f"Found collections: {', '.join(names)}")
+            # Use the first one found if 'shopify_reports' is missing
+            target = "shopify_reports" if "shopify_reports" in names else names[0]
+            collection = client.get_collection(target)
         else:
-            st.sidebar.warning("⚠️ Database connected but contains 0 vectors.")
+            st.sidebar.warning("No collections found in database.")
+            collection = client.get_or_create_collection(name="shopify_reports")
+            
+        st.sidebar.success(f"📊 Vector Count: {collection.count()}")
         return collection
     except Exception as e:
-        st.sidebar.error(f"Chroma Error: {str(e)}")
-        # Fallback: Create if doesn't exist
-        collection = client.get_or_create_collection(
-            name="shopify_reports",
-            metadata={"hnsw:space": "cosine"}
-        )
-        return collection
+        st.sidebar.error(f"Error: {e}")
+        return client.get_or_create_collection(name="shopify_reports")
 
 # Run the loader
 collection = get_collection()
