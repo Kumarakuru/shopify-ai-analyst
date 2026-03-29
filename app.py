@@ -1,6 +1,8 @@
 import streamlit as st
 from openai import OpenAI
 import chromadb
+import shutil
+import os
 
 st.set_page_config(page_title="Shopify AI Analyst", layout="wide")
 st.title("🛍️ Shopify AI Analyst")
@@ -12,7 +14,17 @@ gen_client = OpenAI(base_url=GEN_URL.rstrip('/'), api_key="hf_dummy")
 # ====================== LOAD CHROMA FROM VOLUME ======================
 @st.cache_resource
 def get_collection():
-    client = chromadb.PersistentClient(path="/app/shopify_chroma")
+    volume_path = "/app/shopify_chroma"
+    local_deploy_path = "./shopify_chroma"
+    
+    # 1. If Volume is empty, but GitHub files exist, copy them over
+    if not os.path.exists(volume_path) or len(os.listdir(volume_path)) == 0:
+        if os.path.exists(local_deploy_path):
+            st.sidebar.info("Initializing volume from deployment files...")
+            shutil.copytree(local_deploy_path, volume_path, dirs_exist_ok=True)
+            
+    # 2. Point Chroma to the Volume path
+    client = chromadb.PersistentClient(path=volume_path)
     
     try:
         collection = client.get_collection("shopify_reports")
