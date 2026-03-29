@@ -3,39 +3,35 @@ from openai import OpenAI
 import chromadb
 
 st.set_page_config(page_title="Shopify AI Analyst", layout="wide")
-st.title("🛍️ Shopify AI Analyst (Local Vectors + HF Chat)")
+st.title("🛍️ Shopify AI Analyst (Pre-vectorized Data)")
 
-# Your Generation Endpoint
+# ====================== YOUR GENERATION ENDPOINT ======================
 GEN_URL = "https://pn6ric9mq7jcq9oi.us-east-1.aws.endpoints.huggingface.cloud/v1"
 gen_client = OpenAI(base_url=GEN_URL.rstrip('/'), api_key="hf_dummy")
 
-# Load Chroma with forced dimension fix
+# ====================== LOAD CHROMA READ-ONLY ======================
 @st.cache_resource
 def get_collection():
     client = chromadb.PersistentClient(path="./shopify_chroma")
-    
-    # Force clean any old mismatched collection
     try:
-        client.delete_collection("shopify_reports")
-        st.sidebar.info("Old collection deleted (dimension mismatch fixed)")
-    except:
-        pass
-
-    # Create new collection with correct 2560 dimension
-    return client.get_or_create_collection(
-        name="shopify_reports",
-        metadata={"hnsw:space": "cosine"}
-    )
+        # Try to get existing collection without writing
+        collection = client.get_collection("shopify_reports")
+        st.sidebar.success("✅ Loaded existing collection from GitHub")
+        return collection
+    except Exception as e:
+        st.error(f"Could not load collection: {e}")
+        st.error("Make sure the 'shopify_chroma' folder is correctly uploaded to the root of your GitHub repo.")
+        st.stop()
 
 collection = get_collection()
 
-st.info(f"✅ Loaded {collection.count()} vectors from GitHub")
+st.info(f"✅ Loaded {collection.count()} vectors from GitHub (pre-vectorized locally)")
 
 if collection.count() == 0:
-    st.warning("No vectors found. Please run local_vectorize.py again and re-upload the shopify_chroma folder.")
+    st.warning("No vectors found in the uploaded folder.")
     st.stop()
 
-# Query Section
+# ====================== QUERY SECTION ======================
 st.header("Ask About Your Store")
 
 preset = st.selectbox("Quick Questions", [
@@ -52,28 +48,37 @@ else:
     query = preset
 
 if st.button("🚀 Get Answer + PO"):
-    with st.spinner("Thinking..."):
+    with st.spinner("Retrieving context and generating answer..."):
         results = collection.query(query_texts=[query], n_results=12)
         context = "\n\n".join(results["documents"][0])
 
         prompt = f"""You are an expert Shopify store manager.
 
-Context:
+Context from your store reports:
 {context}
 
 Question: {query}
 
-Answer with summary, insights, and ready PO suggestions. Use tables."""
+Answer with:
+- Summary
+- Key insights (best sellers, weak areas)
+- Ready-to-copy Purchase Order suggestions
 
-        resp = gen_client.chat.completions.create(
-            model="qwen2-5-vl-7b-instruct-gguf-mat",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
-        )
-        answer = resp.choices[0].message.content
+Use tables when helpful."""
 
-        st.markdown("### Answer")
-        st.markdown(answer)
-        st.download_button("Download", answer, "Shopify_Report_PO.txt")
+        try:
+            resp = gen_client.chat.completions.create(
+                model="qwen2-5-vl-7b-instruct-gguf-mat",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=2048
+            )
+            answer = resp.choices[0].message.content
 
-st.caption("Vectors loaded from GitHub • Only chat runs on HF")
+            st.markdown("### 📊 Answer")
+            st.markdown(answer)
+            st.download_button("📥 Download Report + PO", answer, "Shopify_Report_PO.txt")
+        except Exception as e:
+            st.error(f"Generation failed: {str(e)}")
+
+st.caption("Vectors loaded from GitHub • Read-only mode • Only chat runs on HF")
