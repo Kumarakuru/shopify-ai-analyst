@@ -1,80 +1,75 @@
-import streamlit as st
+import pandas as pd
 from openai import OpenAI
 import chromadb
-import shutil
 import os
+from tqdm import tqdm
 
-st.set_page_config(page_title="Shopify AI Analyst", layout="wide")
-st.title("🛍️ Shopify AI Analyst")
+# ====================== YOUR EXACT URLs ======================
+EMBED_URL = "https://rnk392h3d7rcmjm3.us-east4.gcp.endpoints.huggingface.cloud/v1"
 
-# ====================== GENERATION ENDPOINT ======================
-GEN_URL = "https://pn6ric9mq7jcq9oi.us-east-1.aws.endpoints.huggingface.cloud/v1"
-gen_client = OpenAI(base_url=GEN_URL.rstrip('/'), api_key="hf_dummy")
+client = OpenAI(base_url=EMBED_URL.rstrip('/'), api_key="hf_dummy")   # dummy works for most endpoints
 
-# ====================== LOAD CHROMA FROM VOLUME ======================
-@st.cache_resource
-def get_collection():
-    volume_path = "/app/shopify_chroma"
-    
-    # Check if we are running on Railway (where this path exists)
-    if os.path.exists(volume_path):
-        client = chromadb.PersistentClient(path=volume_path)
+# ====================== CHROMA DB (2560 dimension) ======================
+client_db = chromadb.PersistentClient(path="./shopify_chroma")
+try:
+    client_db.delete_collection("shopify_reports")
+except:
+    pass
+
+collection = client_db.get_or_create_collection(
+    name="shopify_reports",
+    metadata={"hnsw:space": "cosine"}
+)
+
+print("✅ ChromaDB ready (dimension 2560 for Qwen3-Embedding-4B)")
+
+# ====================== LOAD YOUR CSVs ======================
+csv_files = [
+    "Total sales by product-24MAR26-24MAR25.csv",
+    "Total sales by product variant-24MAR26-24MAR25.csv",
+    "products_export_1.csv",
+    "Inventory-24MAR26-24MAR25-01.csv"
+    # Add any other CSV files you have here
+]
+
+texts = []
+
+print("Reading CSVs...")
+for file in csv_files:
+    if os.path.exists(file):
+        df = pd.read_csv(file)
+        for _, row in tqdm(df.iterrows(), total=len(df), desc=f"Processing {file}"):
+            row_text = " | ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
+            texts.append(row_text)
     else:
-        # Local fallback
-        client = chromadb.PersistentClient(path="./shopify_chroma")
-    
+        print(f"⚠️ File not found: {file}")
+
+print(f"Total chunks prepared: {len(texts)}")
+
+# ====================== VECTORIZE (using your HF embedding endpoint) ======================
+batch_size = 80   # safe for your T4 endpoint
+success = 0
+
+for i in range(0, len(texts), batch_size):
+    batch = texts[i:i+batch_size]
     try:
-        # This will show us what collections actually exist in your uploaded folder
-        collections = client.list_collections()
-        if not collections:
-            st.sidebar.error("No collections found in the folder.")
-            return client.get_or_create_collection(name="shopify_reports")
-        
-        # Log the names of collections found
-        col_names = [c.name for c in collections]
-        st.sidebar.info(f"Found collections: {', '.join(col_names)}")
-        
-        # Pick the first one available or 'shopify_reports'
-        target_name = "shopify_reports" if "shopify_reports" in col_names else col_names[0]
-        collection = client.get_collection(target_name)
-        
-        st.sidebar.success(f"✅ Loaded {collection.count()} vectors from '{target_name}'")
-        return collection
+        response = client.embeddings.create(
+            input=batch,
+            model="Qwen3-Embedding-4B",
+            encoding_format="float"
+        )
+        embeddings = [data.embedding for data in response.data]
+
+        collection.add(
+            documents=batch,
+            embeddings=embeddings,
+            ids=[f"doc_{i+j}" for j in range(len(batch))]
+        )
+        success += len(batch)
+        print(f"✅ Batch {i//batch_size + 1} done - {len(batch)} vectors added")
     except Exception as e:
-        st.sidebar.error(f"Error: {e}")
-        return client.get_or_create_collection(name="shopify_reports")
+        print(f"❌ Batch failed: {e}")
 
-collection = get_collection()
-
-# ====================== UI LOGIC ======================
-if collection.count() > 0:
-    st.success(f"✅ System Online | {collection.count()} Reports Indexed")
-else:
-    st.error("❌ System Empty | Check sidebar for collection names.")
-
-st.header("Ask About Your Store")
-preset = st.selectbox("Quick Questions", [
-    "Show current sales overview (top 5 best sellers + total revenue)",
-    "What are the weak areas / points to improve (low stock, slow movers)",
-    "Prepare a PO for next 60 days",
-    "Custom query..."
-])
-
-query = st.text_input("Your question") if preset == "Custom query..." else preset
-
-if st.button("🚀 Get Answer"):
-    if collection.count() == 0:
-        st.error("No data available.")
-    else:
-        with st.spinner("Analyzing..."):
-            results = collection.query(query_texts=[query], n_results=10)
-            context = "\n\n".join(results["documents"][0])
-            prompt = f"Context:\n{context}\n\nQuestion: {query}"
-            
-            resp = gen_client.chat.completions.create(
-                model="qwen2-5-vl-7b-instruct-gguf-mat",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            st.markdown(resp.choices[0].message.content)
-
-st.caption("Railway Deployment • Persistent Volume Active")
+print(f"\n🎉 Vectorization finished! Total stored: {success} vectors")
+print("Folder 'shopify_chroma' is now saved in the current directory.")
+print("Next step: Zip this folder and upload it to your GitHub repo.")
