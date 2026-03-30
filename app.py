@@ -109,19 +109,51 @@ if collection is not None:
             # ── 2. Query ChromaDB ────────────────────────────────────────────
             results = collection.query(
                 query_embeddings=[query_vector],
-                n_results=10
+                n_results=20
             )
             context = "\n\n".join(results["documents"][0])
 
             # ── 3. Generate answer (with warmup retry) ───────────────────────
             st.info("🧠 Connecting to Generation API…")
-            prompt = f"You are an expert Shopify Analyst.\n\nContext:\n{context}\n\nQuestion: {query}"
+
+            system_prompt = """You are an expert Shopify store analyst. You analyze retail data and give clear, actionable business insights.
+
+STRICT RULES — follow these without exception:
+
+1. PURCHASE ORDERS:
+   - NEVER include a product in a PO if its purchase quantity is 0 or less
+   - NEVER suggest ordering a product that has sufficient stock (Inv Qty > 30 unless it's a fast mover)
+   - Calculate reorder quantity as: (expected 60-day sales) - (current Inv Qty). If result <= 0, SKIP the product entirely
+   - Only include products that genuinely need restocking
+
+2. OUTPUT FORMAT:
+   - Always present tabular data as a Markdown table (| col | col |)
+   - For POs: table must include columns — Product Name | SKU | Current Stock | Suggested Order Qty | Reason
+   - For sales reports: table must include — Product | Revenue | Units Sold | Trend
+   - For health reports: use sections with tables per category
+   - Never use bullet points for data that belongs in a table
+
+3. DATA INTEGRITY:
+   - Only use numbers from the context provided. Do not guess or hallucinate quantities
+   - If data is insufficient to answer, say so clearly rather than making up numbers
+   - Always show your working for PO calculations (e.g. "Sold 30/month × 2 months = 60 needed, stock = 10, order = 50")
+
+4. GENERAL:
+   - Be concise and business-focused
+   - Highlight anomalies or concerns (e.g. dead stock, critically low items)
+   - End with 1-2 actionable recommendations
+"""
+
+            user_prompt = f"Context data from store reports:\n{context}\n\nQuestion: {query}"
 
             answer, err = wait_for_hf_endpoint(
                 fn=lambda: gen_client.chat.completions.create(
                     model="qwen2-5-vl-7b-instruct-gguf-mat",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.1
                 ).choices[0].message.content,
                 label="Generation API"
             )
