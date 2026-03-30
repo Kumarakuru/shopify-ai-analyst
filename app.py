@@ -88,15 +88,7 @@ collection = get_collection()
 if collection is not None:
     st.header("Ask About Your Store")
 
-    preset = st.selectbox("Quick Questions", [
-        "Show current sales overview (top 5 best sellers + total revenue)",
-        "What are the weak areas / points to improve (low stock, slow movers)",
-        "Prepare a PO for next 60 days",
-        "Give me a full store health report",
-        "Custom query..."
-    ])
-
-    query = st.text_input("Your question") if preset == "Custom query..." else preset
+    query = st.text_input("Ask anything about your store", placeholder="e.g. What are my top 5 best sellers this month?")
 
     if st.button("🚀 Analyze Data"):
         with st.spinner("Communicating with AI models..."):
